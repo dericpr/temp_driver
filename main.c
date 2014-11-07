@@ -21,6 +21,9 @@
 #include <math.h>
 #include "crankbrew.h"
 
+
+char * temp_ambient = "/sys/bus/w1/devices/28-000004f1d675/w1_slave";
+char * temp_wort = "/sys/bus/w1/devices/28-00000449da30/w1_slave";
 int temp_update(gre_io_t *send_handle, char * target, temp_update_t *event_data)
 {
 	gre_io_serialized_data_t    *nbuffer = NULL;
@@ -50,7 +53,7 @@ static void * check_temperature(void * data)
 	temp_update_t 	event_data;
 	int 			ret;
 	float 			old_ambient,old_wort;
-	FILE 			*fp;
+	FILE 			*fp, *fp1;
 	unsigned char 	onewire[6];
 	int 			a,b;
 	char 			hex_string[6];
@@ -59,9 +62,9 @@ static void * check_temperature(void * data)
 
 	while (1) {
 		sleep(1);
-		fp = fopen("/sys/bus/w1/devices/28-000004f1d675/w1_slave", "r");
-		
-		if ( fp != NULL )
+		fp = fopen(temp_wort, "r");
+	    fp1 = fopen(temp_ambient, "r");
+		if ( fp != NULL && fp1 != NULL )
 		{
 			old_ambient = event_data.temp1;
 			old_wort = event_data.temp2;
@@ -72,12 +75,24 @@ static void * check_temperature(void * data)
 			snprintf(hex_string, 6, "%02x%02x", b,a);
 			sscanf(hex_string, "%x", &dec_val);
 			float_val = ((float)dec_val * 62.5) / 1000;
-			printf("Read Temp : %02f\n", float_val);
+			printf("Read Temp Wort: %02f\n", float_val);
 
 			float rounded_down = ceilf(float_val * 100) / 100;
 			printf("Temp rounded %f\n", rounded_down);
 			event_data.temp1 = rounded_down;
-			event_data.temp2 = rounded_down + 1.0f;
+			memset(onewire,0,6);	
+			fgets(onewire, 6, fp1);
+			fclose(fp1);
+			sscanf(&onewire[0], "%2x", &a);
+			sscanf(&onewire[2], "%2x", &b);
+			snprintf(hex_string, 6, "%02x%02x", b,a);
+			sscanf(hex_string, "%x", &dec_val);
+			float_val = ((float)dec_val * 62.5) / 1000;
+			printf("Read Temp Ambient: %02f\n", float_val);
+			rounded_down = 0.0f;
+			rounded_down = ceilf(float_val * 100) / 100;
+			printf("Temp rounded %f\n", rounded_down);
+			event_data.temp2 = rounded_down;
 			printf("Got temp data of : %f:%f\n", event_data.temp1,event_data.temp2);
 			if ( event_data.temp1 != old_ambient || event_data.temp2 != old_wort ) {
 				thread_data->temp_data.temp1 = event_data.temp1;
