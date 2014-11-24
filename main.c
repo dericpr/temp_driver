@@ -19,11 +19,49 @@
 #include <errno.h>     
 #include <string.h>  
 #include <math.h>
+#include "curl/curl.h"
 #include "crankbrew.h"
 
 
-char * temp_ambient = "/sys/bus/w1/devices/28-000004f1d675/w1_slave";
-char * temp_wort = "/sys/bus/w1/devices/28-00000449da30/w1_slave";
+char * temp_wort = "/sys/bus/w1/devices/28-000004f1d675/w1_slave";
+char * temp_ambient = "/sys/bus/w1/devices/28-00000449da30/w1_slave";
+
+int read_setpoint(void *data)
+{
+	thdata	*thread_data = (thdata *)data;
+}
+	
+int log_temp(void *data) 
+{
+	thdata 			*thread_data = (thdata *)data;
+
+	CURL *curl;
+	CURLcode res;
+	char postdata[255];
+	while (1) {
+
+	curl_global_init(CURL_GLOBAL_ALL);
+	curl = curl_easy_init();
+	if (curl && thread_data->good_read == 1) {
+			sprintf(postdata,"ambient=%f&wort=%f&sched=%d",thread_data->temp_data.temp1,thread_data->temp_data.temp2,1);
+			curl_easy_setopt(curl,CURLOPT_URL, "http://www.octapex.com/crankbrew/demo.php");
+			curl_easy_setopt(curl,CURLOPT_POSTFIELDS, postdata);
+			curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+			curl_easy_setopt(curl, CURLOPT_FORBID_REUSE, 1L); 
+			res = curl_easy_perform(curl);
+			if ( res != CURLE_OK) {
+				fprintf(stderr, "curl_easy_perform() failed : %s\n", curl_easy_strerror(res));
+			}
+			thread_data->good_read = 0;
+		}
+		curl_easy_cleanup(curl);
+		curl_global_cleanup();
+		sprintf(postdata,"");
+		sleep(60);
+	}
+	return 0;
+}
+
 int temp_update(gre_io_t *send_handle, char * target, temp_update_t *event_data)
 {
 	gre_io_serialized_data_t    *nbuffer = NULL;
@@ -61,7 +99,6 @@ static void * check_temperature(void * data)
 	float 			float_val = 0.0;
 
 	while (1) {
-		sleep(1);
 		fp = fopen(temp_wort, "r");
 	    fp1 = fopen(temp_ambient, "r");
 		if ( fp != NULL && fp1 != NULL )
@@ -69,37 +106,53 @@ static void * check_temperature(void * data)
 			old_ambient = event_data.temp1;
 			old_wort = event_data.temp2;
 			fgets(onewire, 6, fp);
-			fclose(fp);
 			sscanf(&onewire[0], "%2x", &a);
 			sscanf(&onewire[2], "%2x", &b);
 			snprintf(hex_string, 6, "%02x%02x", b,a);
 			sscanf(hex_string, "%x", &dec_val);
 			float_val = ((float)dec_val * 62.5) / 1000;
-			printf("Read Temp Wort: %02f\n", float_val);
 
 			float rounded_down = ceilf(float_val * 100) / 100;
-			printf("Temp rounded %f\n", rounded_down);
+			if (rounded_down > 100.0f) {
+				fclose(fp);
+				fclose(fp1);
+				continue;
+			}
 			event_data.temp1 = rounded_down;
 			memset(onewire,0,6);	
 			fgets(onewire, 6, fp1);
-			fclose(fp1);
 			sscanf(&onewire[0], "%2x", &a);
 			sscanf(&onewire[2], "%2x", &b);
 			snprintf(hex_string, 6, "%02x%02x", b,a);
 			sscanf(hex_string, "%x", &dec_val);
 			float_val = ((float)dec_val * 62.5) / 1000;
-			printf("Read Temp Ambient: %02f\n", float_val);
 			rounded_down = 0.0f;
 			rounded_down = ceilf(float_val * 100) / 100;
-			printf("Temp rounded %f\n", rounded_down);
+			if (rounded_down > 100.0f) {
+				fclose(fp);
+				fclose(fp1);
+				continue;
+			}
 			event_data.temp2 = rounded_down;
-			printf("Got temp data of : %f:%f\n", event_data.temp1,event_data.temp2);
+			thread_data->good_read = 1;
 			if ( event_data.temp1 != old_ambient || event_data.temp2 != old_wort ) {
 				thread_data->temp_data.temp1 = event_data.temp1;
 				thread_data->temp_data.temp2 = event_data.temp2;
+				printf("Got temp data of : %f:%f\n", thread_data->temp_data.temp1,thread_data->temp_data.temp2);
 				ret = temp_update(thread_data->send_handle, NULL, &event_data);
 			}
 		}
+		fclose(fp);
+		fclose(fp1);
+		if ( thread_data->temp_data.temp2 < 18.7 ) {
+			printf("TURNING ON HEATER\n");
+			system("echo 1 > /sys/class/gpio/gpio51/value");
+		}
+		if ( thread_data->temp_data.temp2 == 19.0 ) {
+			printf("TURNING OFF HEATER!\n");
+			system("echo 0 > /sys/class/gpio/gpio51/value");
+		}
+		sleep(30);
 	}
 }
 
@@ -123,7 +176,7 @@ int main(int argc, char* argv[])
 {
 	pthread_mutex_t count_mutex;
 	pthread_cond_t count_threshold_cv;
-	pthread_t temperature_thread;
+	pthread_t temperature_thread,templog_thread;
 	int debug = 0;
 	int not_connect = 0;
 	int c;
@@ -137,7 +190,7 @@ int main(int argc, char* argv[])
 
 	data1.temp_data.temp1 = 0.0;
 	data1.temp_data.temp2 = 0.0;
-	
+	data1.good_read = 0;	
 	while ((c = getopt( argc, argv, "vc:p:")) != -1 )
 	{
 		switch(c)
@@ -171,6 +224,8 @@ int main(int argc, char* argv[])
 	data1.send_handle = send_handle;
 	printf("Starting temperature Driver\n");
 	pthread_create(&temperature_thread, NULL, (void *)&check_temperature, &data1);
+	sleep(1);
+	pthread_create(&templog_thread, NULL, (void *)&log_temp, &data1);
 	ret = pthread_mutex_init(&mutex, NULL);
 	if(ret != 0) {
 		printf("Mutex error\n");

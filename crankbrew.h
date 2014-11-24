@@ -4,11 +4,13 @@
 typedef struct temp_update {
 	float	temp1;
 	float 	temp2;
+	float set_point;
 } temp_update_t;
 
 typedef struct _thdata {
 	gre_io_t *send_handle;
 	temp_update_t temp_data;
+	int good_read;
 } thdata;
 
 
