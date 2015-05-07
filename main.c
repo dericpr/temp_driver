@@ -79,7 +79,7 @@ int log_temp(void *data)
 	curl_global_init(CURL_GLOBAL_ALL);
 	curl = curl_easy_init();
 	if (curl && thread_data->good_read == 1) {
-			sprintf(postdata,"ambient=%f&wort=%f&sched=%d&heatcool=%d",thread_data->temp_data.temp1,thread_data->temp_data.temp2,1, thread_data->heatcool);
+			sprintf(postdata,"ambient=%f&wort=%f&sched=%d&heatcool=%d",thread_data->temp_data.temp2,thread_data->temp_data.temp1,2, thread_data->heatcool);
 			curl_easy_setopt(curl,CURLOPT_URL, web_address);
 			curl_easy_setopt(curl,CURLOPT_POSTFIELDS, postdata);
 			curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
