@@ -20,11 +20,40 @@
 #include <string.h>  
 #include <math.h>
 #include "curl/curl.h"
+#include "lcfg/lcfg.h"
 #include "crankbrew.h"
 
 
-char * temp_wort = "/sys/bus/w1/devices/28-000004f1d675/w1_slave";
-char * temp_ambient = "/sys/bus/w1/devices/28-00000449da30/w1_slave";
+char * temp_wort;
+char * temp_ambient;
+char * web_address;
+
+float setpoint = 13.0f;
+
+struct MemoryStruct {
+	  char *memory;
+	  size_t size;
+};
+
+static size_t
+WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *userp)
+{
+	  size_t realsize = size * nmemb;
+	  struct MemoryStruct *mem = (struct MemoryStruct *)userp;
+		 
+	  mem->memory = realloc(mem->memory, mem->size + realsize + 1);
+	  if(mem->memory == NULL) {
+		  /* out of memory! */ 
+		  printf("not enough memory (realloc returned NULL)\n");
+		  return 0;
+	  }
+							    
+	  memcpy(&(mem->memory[mem->size]), contents, realsize);
+	  mem->size += realsize;
+	  mem->memory[mem->size] = 0;
+
+	  return realsize;
+}
 
 int read_setpoint(void *data)
 {
@@ -38,13 +67,19 @@ int log_temp(void *data)
 	CURL *curl;
 	CURLcode res;
 	char postdata[255];
+
+	struct MemoryStruct chunk;
+
+	chunk.memory = malloc(1);
+	chunk.size = 0;
+
 	while (1) {
 
 	curl_global_init(CURL_GLOBAL_ALL);
 	curl = curl_easy_init();
 	if (curl && thread_data->good_read == 1) {
 			sprintf(postdata,"ambient=%f&wort=%f&sched=%d",thread_data->temp_data.temp1,thread_data->temp_data.temp2,1);
-			curl_easy_setopt(curl,CURLOPT_URL, "http://www.octapex.com/crankbrew/demo.php");
+			curl_easy_setopt(curl,CURLOPT_URL, web_address);
 			curl_easy_setopt(curl,CURLOPT_POSTFIELDS, postdata);
 			curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
 			curl_easy_setopt(curl, CURLOPT_FORBID_REUSE, 1L); 
@@ -67,6 +102,7 @@ int temp_update(gre_io_t *send_handle, char * target, temp_update_t *event_data)
 	gre_io_serialized_data_t    *nbuffer = NULL;
 	int ret;
 
+		printf("%s : %d\n", __FUNCTION__,__LINE__);
 	/*
 	 * Send a named event with an additional structure payload
 	 */
@@ -144,13 +180,21 @@ static void * check_temperature(void * data)
 		}
 		fclose(fp);
 		fclose(fp1);
-		if ( thread_data->temp_data.temp2 < 18.7 ) {
+		if ( thread_data->temp_data.temp2 < (setpoint-0.3) ) {
 			printf("TURNING ON HEATER\n");
 			system("echo 1 > /sys/class/gpio/gpio51/value");
+			system("echo 0 > /sys/class/gpio/gpio60/value");
 		}
-		if ( thread_data->temp_data.temp2 == 19.0 ) {
-			printf("TURNING OFF HEATER!\n");
+		if ( thread_data->temp_data.temp2 == setpoint ) {
+			printf("TURNING OFF HEATING/COOLING!\n");
 			system("echo 0 > /sys/class/gpio/gpio51/value");
+			system("echo 0 > /sys/class/gpio/gpio60/value");
+		}
+		if ( thread_data->temp_data.temp2 > (setpoint + 0.4) ) {
+			printf("TURNING ON CHILLER\n");
+			system("echo 1 > /sys/class/gpio/gpio60/value");
+			system("echo 0 > /sys/class/gpio/gpio51/value");
+			
 		}
 		sleep(30);
 	}
@@ -171,11 +215,22 @@ int get_input(thdata *data)
 		}
 	}
 }
+enum lcfg_status example_visitor(const char *key, void *data, size_t len, void *user_data) {
+    int i;
+    char c;
+
+    printf("%s = \"", key);
+    for( i = 0; i < len; i++ ) {
+        c = *((const char *)(data + i));
+        printf("%c", isprint(c) ? c : '.');
+    }
+    puts("\"");
+
+    return lcfg_status_ok;
+}
 
 int main(int argc, char* argv[])
 {
-	pthread_mutex_t count_mutex;
-	pthread_cond_t count_threshold_cv;
 	pthread_t temperature_thread,templog_thread;
 	int debug = 0;
 	int not_connect = 0;
@@ -187,11 +242,25 @@ int main(int argc, char* argv[])
 	int done = 0;
 	gre_io_t *send_handle;
 	thdata data1;
+	size_t len;
+	struct lcfg *cfg = lcfg_new("./brew.cfg");
 
+	if ( lcfg_parse(cfg) != lcfg_status_ok ) {
+		printf("Error reading config file : %s\n", lcfg_error_get(cfg));
+	} else {
+		lcfg_accept(cfg, example_visitor,0);
+	}
+
+	lcfg_value_get(cfg, "wort_address",(void *)&temp_wort, &len);
+	lcfg_value_get(cfg, "ambient_address",(void *)&temp_ambient, &len);
+	if ( lcfg_value_get(cfg, "web_address", (void *)&web_address, &len) != lcfg_status_ok ) {
+		printf("Error reading web_address : %s\n", lcfg_error_get(cfg));
+	}
+	
 	data1.temp_data.temp1 = 0.0;
 	data1.temp_data.temp2 = 0.0;
 	data1.good_read = 0;	
-	while ((c = getopt( argc, argv, "vc:p:")) != -1 )
+	while ((c = getopt( argc, argv, "vc:p:t:")) != -1 )
 	{
 		switch(c)
 		{
@@ -202,8 +271,13 @@ int main(int argc, char* argv[])
 				channel = optarg;
 				printf("Setting channel to : %s\n", channel);
 				break;
+			case 't':
+				setpoint= atof(optarg);
+				printf("setting Ferment temp to %f\n", setpoint);
+				break;
 		}
 	}
+#ifdef STORYBOARD
 	if ( channel == NULL ) {
 		printf("You must supply a greio channel temp_driver -c <storyboard channel>\n");
 		exit(-1);
@@ -220,8 +294,10 @@ int main(int argc, char* argv[])
 			sleep(1);
 		}
 	}
+
 	// push the send handle into the thread data pointer so we can access it in our check_tmep thread.
 	data1.send_handle = send_handle;
+#endif
 	printf("Starting temperature Driver\n");
 	pthread_create(&temperature_thread, NULL, (void *)&check_temperature, &data1);
 	sleep(1);
@@ -241,11 +317,17 @@ int main(int argc, char* argv[])
 	get_input(&data1);
 	while(!done) {
 		printf("waiting\n");
+		pthread_mutex_lock(&mutex);
 		pthread_cond_wait(&condvar, &mutex);
 	}
 
 
+	lcfg_delete(cfg);
+	free (temp_wort);
+	free (temp_ambient);
+	free (web_address);
 	printf("Done Temperature Driver\n");
+
 
 	return 0;
 }

@@ -7,10 +7,10 @@ INC_PATH=/home/dpraymond/linux-am335SDK-armle-fbdev-obj/include -I/home/dpraymon
 X86_LIB_PATH=/Applications/Crank_Software/Storyboard_Engine/3.2.1.201405300145/linux-x86-fbdev-obj/lib
 X86_INC_PATH=/Applications/Crank_Software/Storyboard_Engine/3.2.1.201405300145/linux-x86-fbdev-obj/include
 
-LIBS = -lgreio -lpthread -lm  -lcurl
+LIBS = -lgreio -lpthread -lm  -lcurl -llcfg
 #gcc -g  -m32 -I/home/dpraymond/linux-x86-fbdev-obj/include/ -L/home/dpraymond/linux-x86-fbdev-obj/lib -o test main.c -lgreio -lpthread
 all:
-	${CC} -I${INC_PATH} -L${LIB_PATH} main.c -o temp_driver ${LIBS}
+	${CC} -g -I${INC_PATH} -L${LIB_PATH} main.c -o temp_driver ${LIBS}
 
 x86:
 	${X86_CC} -m32 -I${X86_INC_PATH} -L${X86_LIB_PATH} main.c -o temp_driver_x86 ${LIBS}
