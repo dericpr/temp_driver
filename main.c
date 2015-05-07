@@ -22,7 +22,8 @@
 #include "curl/curl.h"
 #include "lcfg/lcfg.h"
 #include "crankbrew.h"
-
+#include <fcntl.h>
+#include <dirent.h>
 
 char * temp_wort;
 char * temp_ambient;
@@ -78,7 +79,7 @@ int log_temp(void *data)
 	curl_global_init(CURL_GLOBAL_ALL);
 	curl = curl_easy_init();
 	if (curl && thread_data->good_read == 1) {
-			sprintf(postdata,"ambient=%f&wort=%f&sched=%d",thread_data->temp_data.temp1,thread_data->temp_data.temp2,1);
+			sprintf(postdata,"ambient=%f&wort=%f&sched=%d&heatcool=%d",thread_data->temp_data.temp1,thread_data->temp_data.temp2,1, thread_data->heatcool);
 			curl_easy_setopt(curl,CURLOPT_URL, web_address);
 			curl_easy_setopt(curl,CURLOPT_POSTFIELDS, postdata);
 			curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
@@ -127,46 +128,88 @@ static void * check_temperature(void * data)
 	temp_update_t 	event_data;
 	int 			ret;
 	float 			old_ambient,old_wort;
-	FILE 			*fp, *fp1;
-	unsigned char 	onewire[6];
+	int 			fp, fp1;
+	unsigned char 	onewire[256];
 	int 			a,b;
 	char 			hex_string[6];
 	int 			dec_val = 0;
 	float 			float_val = 0.0;
+	int				num_read = 0;
+	char 			tmpData[6];
+	int				failed_read = 0;
 
 	while (1) {
-		fp = fopen(temp_wort, "r");
-	    fp1 = fopen(temp_ambient, "r");
-		if ( fp != NULL && fp1 != NULL )
+		fp = open(temp_wort, O_RDONLY);
+	    fp1 = open(temp_ambient, O_RDONLY);
+		if ( fp != -1 && fp1 != -1 )
 		{
 			old_ambient = event_data.temp1;
 			old_wort = event_data.temp2;
-			fgets(onewire, 6, fp);
-			sscanf(&onewire[0], "%2x", &a);
-			sscanf(&onewire[2], "%2x", &b);
-			snprintf(hex_string, 6, "%02x%02x", b,a);
-			sscanf(hex_string, "%x", &dec_val);
-			float_val = ((float)dec_val * 62.5) / 1000;
-
-			float rounded_down = ceilf(float_val * 100) / 100;
-			if (rounded_down > 100.0f) {
-				fclose(fp);
-				fclose(fp1);
+			//fgets(onewire, 6, fp);
+			//sscanf(&onewire[0], "%2x", &a);
+			//sscanf(&onewire[2], "%2x", &b);
+			//snprintf(hex_string, 6, "%02x%02x", b,a);
+			//sscanf(hex_string, "%x", &dec_val);
+			//float_val = ((float)dec_val * 62.5) / 1000;
+			while((num_read = read(fp, onewire, 256)) > 0) 
+  			{
+				if ( strstr(onewire, "NO") == NULL ) {
+   					strncpy(tmpData, strstr(onewire, "t=") + 2, 5); 
+   					float_val = strtof(tmpData, NULL);
+   					float_val = float_val /1000;
+					printf("Wort : Temp: %.3f C\n", float_val);
+					failed_read = 0;
+				} else {
+					failed_read = 1;
+					break;
+				}
+  			}
+			if ( failed_read == 1 ) {
+				close(fp);
+				close(fp1);
+				printf("SKIPPING FAILED READ\n");
 				continue;
 			}
+			float rounded_down = ceilf(float_val * 100) / 100;
+			if (rounded_down > 100.0f) {
+				close(fp);
+				close(fp1);
+				continue;
+			}
+
 			event_data.temp1 = rounded_down;
-			memset(onewire,0,6);	
-			fgets(onewire, 6, fp1);
-			sscanf(&onewire[0], "%2x", &a);
-			sscanf(&onewire[2], "%2x", &b);
-			snprintf(hex_string, 6, "%02x%02x", b,a);
-			sscanf(hex_string, "%x", &dec_val);
-			float_val = ((float)dec_val * 62.5) / 1000;
+			memset(onewire,0,256);
+			memset(tmpData,0,6);	
+			while((num_read = read(fp1, onewire, 256)) > 0) 
+  			{
+				if ( strstr(onewire, "NO") == NULL ) {
+   					strncpy(tmpData, strstr(onewire, "t=") + 2, 5); 
+   					float_val = strtof(tmpData, NULL);
+					float_val = float_val / 1000;
+   					printf("Ambient Temp: %.3f C\n", float_val);
+					failed_read = 0;
+  				} else {
+					failed_read = 1;
+					break;
+				}
+			}
+			if ( failed_read == 1 ) {
+				close(fp);
+				close(fp1);
+				printf("SKIPPING FAILED READ\n");
+				continue;
+			}
+			//fgets(onewire, 6, fp1);
+			//sscanf(&onewire[0], "%2x", &a);
+			//sscanf(&onewire[2], "%2x", &b);
+			//snprintf(hex_string, 6, "%02x%02x", b,a);
+			//sscanf(hex_string, "%x", &dec_val);
+			//float_val = ((float)dec_val * 62.5) / 1000;
 			rounded_down = 0.0f;
 			rounded_down = ceilf(float_val * 100) / 100;
 			if (rounded_down > 100.0f) {
-				fclose(fp);
-				fclose(fp1);
+				close(fp);
+				close(fp1);
 				continue;
 			}
 			event_data.temp2 = rounded_down;
@@ -175,34 +218,39 @@ static void * check_temperature(void * data)
 				thread_data->temp_data.temp1 = event_data.temp1;
 				thread_data->temp_data.temp2 = event_data.temp2;
 				printf("Got temp data of : %f:%f\n", thread_data->temp_data.temp1,thread_data->temp_data.temp2);
-				ret = temp_update(thread_data->send_handle, NULL, &event_data);
+			//	ret = temp_update(thread_data->send_handle, NULL, &event_data);
 			}
 		}
-		fclose(fp);
-		fclose(fp1);
-		if ( thread_data->temp_data.temp2 < (setpoint-0.3) ) {
+		close(fp);
+		close(fp1);
+		printf("GOT WORT TEMP OF : %f and AMBIENT OF %f and heatcool is %d\n", thread_data->temp_data.temp1,thread_data->temp_data.temp2,thread_data->heatcool);
+		if ( thread_data->temp_data.temp1 < (setpoint-0.3) ) {
 			printf("TURNING ON HEATER\n");
 			system("echo 1 > /sys/class/gpio/gpio51/value");
 			system("echo 0 > /sys/class/gpio/gpio60/value");
+			thread_data->heatcool=2;
 		}
-		if ( thread_data->temp_data.temp2 == setpoint ) {
+		if ( thread_data->temp_data.temp1 == setpoint || thread_data->temp_data.temp1 == (setpoint+0.1) || thread_data->temp_data.temp1 == (setpoint-0.1) ) {
 			printf("TURNING OFF HEATING/COOLING!\n");
 			system("echo 0 > /sys/class/gpio/gpio51/value");
 			system("echo 0 > /sys/class/gpio/gpio60/value");
+			thread_data->heatcool=1;
 		}
-		if ( thread_data->temp_data.temp2 > (setpoint + 0.4) ) {
+		if ( thread_data->temp_data.temp1 > (setpoint + 0.4)  && thread_data->temp_data.temp2 >= 3) {
 			printf("TURNING ON CHILLER\n");
 			system("echo 1 > /sys/class/gpio/gpio60/value");
 			system("echo 0 > /sys/class/gpio/gpio51/value");
+			thread_data->heatcool=3;
 			
 		}
-		sleep(30);
+		sleep(5);
 	}
 }
 
 int get_input(thdata *data) 
 {
 	char a[2];
+	char t[16];
 	while (1)
 	{
 		printf("Command >\n");
@@ -212,6 +260,15 @@ int get_input(thdata *data)
 		}
 		if ( strcmp(a,"w") == 0 ) {
 				printf("\tWort Temp is %f\n", data->temp_data.temp2);
+		}
+		if ( strcmp(a,"t") == 0 ) {
+			printf("Input Temp as Float : ");
+			fgets(t,16,stdin);
+			printf("Setting setpoint to %f\n", atof(t));
+		    setpoint = atof(t);	
+		}
+		if ( strcmp(a,"s") == 0 ) {
+			printf("\t Setpoint is %f\n", setpoint);
 		}
 	}
 }
@@ -260,6 +317,7 @@ int main(int argc, char* argv[])
 	data1.temp_data.temp1 = 0.0;
 	data1.temp_data.temp2 = 0.0;
 	data1.good_read = 0;	
+	data1.heatcool = 1;
 	while ((c = getopt( argc, argv, "vc:p:t:")) != -1 )
 	{
 		switch(c)

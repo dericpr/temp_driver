@@ -11,6 +11,7 @@ typedef struct _thdata {
 	gre_io_t *send_handle;
 	temp_update_t temp_data;
 	int good_read;
+	int heatcool;
 } thdata;
 
 
