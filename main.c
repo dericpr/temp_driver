@@ -150,7 +150,7 @@ float read_temp(int fp)
 			strncpy(tmpData, strstr(onewire, "t=") + 2, 5); 
 			float_val = strtof(tmpData, NULL);
 			float_val = float_val /1000;
-			syslog(LOG_INFO,"Wort : Temp: %.3f C\n", float_val);
+			syslog(LOG_INFO,"Read Temp: %.3f C\n", float_val);
 			failed_read = 0;
 		} else {
 			failed_read = 1;
@@ -179,11 +179,11 @@ static void * check_temperature(void * data)
 	char 			hex_string[6];
 	int 			dec_val = 0;
 	float 			temp_read;
-	fp = open(temp_wort, O_RDONLY);
-	fp1 = open(temp_ambient, O_RDONLY);
-	if ( fp != -1 && fp1 != -1 )
+	while (1) 
 	{
-		while (1) 
+		fp = open(temp_wort, O_RDONLY);
+		fp1 = open(temp_ambient, O_RDONLY);
+		if ( fp != -1 && fp1 != -1 )
 		{
 			old_ambient = event_data.temp1;
 			old_wort = event_data.temp2;
@@ -192,11 +192,15 @@ static void * check_temperature(void * data)
 			temp_read = read_temp(fp);
 			if ( temp_read ) {
 				event_data.temp1 = temp_read;
+			} else {
+				continue;
 			}
 			temp_read = read_temp(fp1);
 			if ( temp_read ) {
 				event_data.temp2 = temp_read;
 				thread_data->good_read = 1;
+			} else {
+				continue;
 			}
 			if ( event_data.temp1 != old_ambient || event_data.temp2 != old_wort ) {
 				thread_data->temp_data.temp1 = event_data.temp1;
@@ -206,8 +210,8 @@ static void * check_temperature(void * data)
 			}
 		
 			syslog(LOG_DEBUG,"GOT WORT TEMP OF : %f and AMBIENT OF %f and heatcool is %d", thread_data->temp_data.temp1,thread_data->temp_data.temp2,thread_data->heatcool);
-			if ( thread_data->temp_data.temp1 < (setpoint-0.3) ) {
-				syslog(LOG_NOTICE,"Heat Enabled");
+			if ( thread_data->temp_data.temp1 < (setpoint-0.3) && thread_data->temp_data.temp1 != -1 ) {
+				syslog(LOG_NOTICE,"Heat Enabled [ Setpoint %f : Wort Temp : %f\n", setpoint,thread_data->temp_data.temp1);
 				if ( control_temp("1","0") ) {
 					thread_data->heatcool=2;
 				} else {
@@ -222,8 +226,8 @@ static void * check_temperature(void * data)
 					syslog(LOG_ERR,"Unable to disable heating and cooling\n");
 				}
 			}
-			if ( thread_data->temp_data.temp1 > (setpoint + 0.4)  && thread_data->temp_data.temp2 >= 3) {
-				syslog(LOG_NOTICE,"Chill Enabled\n");
+			if ( thread_data->temp_data.temp1 > (setpoint + 0.4)  && thread_data->temp_data.temp2 >= 3 && thread_data->temp_data.temp1 != -1) {
+				syslog(LOG_NOTICE,"Chill Enabled [ Setpoint %f : Wort Temp : %f\n", setpoint,thread_data->temp_data.temp1);
 				if ( control_temp("0","1") ) {
 					thread_data->heatcool=3;
 				} else {
@@ -232,12 +236,12 @@ static void * check_temperature(void * data)
 
 			}
 
+			close(fp1);
+			close(fp);
 			sleep(5);
+		 } else {
+			syslog(LOG_ERR, "unable to open temperature sensors");
 		}
-		close(fp1);
-		close(fp);
-	} else {
-		syslog(LOG_ERR, "unable to open temperature sensors");
 	}
 }
 
@@ -296,6 +300,7 @@ int main(int argc, char* argv[])
 	data1.temp_data.temp2 = 0.0;
 	data1.good_read = 0;	
 	data1.heatcool = 1;
+	control_temp("0","0");
 	while ((c = getopt( argc, argv, "vc:p:t:")) != -1 )
 	{
 		switch(c)
