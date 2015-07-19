@@ -86,7 +86,11 @@ int log_temp(void *data)
 			sprintf(postdata,"ambient=%f&wort=%f&sched=%d&heatcool=%d",thread_data->temp_data.temp2,thread_data->temp_data.temp1,2, thread_data->heatcool);
 			curl_easy_setopt(curl,CURLOPT_URL, web_address);
 			curl_easy_setopt(curl,CURLOPT_POSTFIELDS, postdata);
-			curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+			if ( thread_data->debug == 1 ) {
+				curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+			} else {
+				curl_easy_setopt(curl, CURLOPT_VERBOSE, 0L);
+			}
 			curl_easy_setopt(curl, CURLOPT_FORBID_REUSE, 1L); 
 			res = curl_easy_perform(curl);
 			if ( res != CURLE_OK) {
@@ -140,10 +144,9 @@ float read_temp(int fp)
 	int				num_read = 0;
 	int				failed_read = 0;	
 	float 			float_val = 0.0;
-
 	memset(onewire,0,256);
 	memset(tmpData,0,6);	
-
+	
 	while((num_read = read(fp, onewire, 256)) > 0) 
 	{
 		if ( strstr(onewire, "NO") == NULL ) {
@@ -159,11 +162,11 @@ float read_temp(int fp)
 	}
 	if ( failed_read == 1 ) {
 		syslog(LOG_ERR, "Failed to read Wort temp sensor, skipping to next cycle");
-		return -1;
+		return -999.0;
 	}
 	rounded_down = ceilf(float_val * 100) / 100;
 	if (rounded_down > 100.0f) {
-		return -1;
+		return -999.0;
 	}
 	return rounded_down;
 }
@@ -185,31 +188,34 @@ static void * check_temperature(void * data)
 		fp1 = open(temp_ambient, O_RDONLY);
 		if ( fp != -1 && fp1 != -1 )
 		{
-			old_ambient = event_data.temp1;
-			old_wort = event_data.temp2;
+			old_wort = event_data.temp1;
+			old_ambient = event_data.temp2;
 			
 			// read wort then read ambient
 			temp_read = read_temp(fp);
-			if ( temp_read ) {
+			if ( temp_read != -999.0 ) {
 				event_data.temp1 = temp_read;
 			} else {
+				event_data.temp1 = old_wort; 
+				syslog(LOG_ERR, "one wire read failed for Wort, using old temp of %f",event_data.temp1);
 				continue;
 			}
 			temp_read = read_temp(fp1);
-			if ( temp_read ) {
+			if ( temp_read != -999.0 ) {
 				event_data.temp2 = temp_read;
 				thread_data->good_read = 1;
 			} else {
+				event_data.temp2 = old_ambient;
+				syslog(LOG_ERR, "one wire read failed for Ambient, using old temp of %f",event_data.temp2);
 				continue;
 			}
-			if ( event_data.temp1 != old_ambient || event_data.temp2 != old_wort ) {
+			if ( event_data.temp1 != old_wort || event_data.temp2 != old_ambient ) {
 				thread_data->temp_data.temp1 = event_data.temp1;
 				thread_data->temp_data.temp2 = event_data.temp2;
-				syslog(LOG_NOTICE,"Got temp data of : %f:%f\n", thread_data->temp_data.temp1,thread_data->temp_data.temp2);
+				syslog(LOG_DEBUG,"GOT WORT TEMP OF : %f and AMBIENT OF %f and heatcool is %d", thread_data->temp_data.temp1,thread_data->temp_data.temp2,thread_data->heatcool);
 			//	ret = temp_update(thread_data->send_handle, NULL, &event_data);
 			}
 		
-			syslog(LOG_DEBUG,"GOT WORT TEMP OF : %f and AMBIENT OF %f and heatcool is %d", thread_data->temp_data.temp1,thread_data->temp_data.temp2,thread_data->heatcool);
 			if ( thread_data->temp_data.temp1 < (setpoint-0.3) && thread_data->temp_data.temp1 != -1 ) {
 				syslog(LOG_NOTICE,"Heat Enabled [ Setpoint %f : Wort Temp : %f\n", setpoint,thread_data->temp_data.temp1);
 				if ( control_temp("1","0") ) {
@@ -233,12 +239,10 @@ static void * check_temperature(void * data)
 				} else {
 					syslog(LOG_ERR,"Unable to enable the chiller\n");
 				}
-
 			}
-
 			close(fp1);
 			close(fp);
-			sleep(5);
+			sleep(thread_data->read_freq);
 		 } else {
 			syslog(LOG_ERR, "unable to open temperature sensors");
 		}
@@ -263,7 +267,6 @@ enum lcfg_status read_cfg(const char *key, void *data, size_t len, void *user_da
 int main(int argc, char* argv[])
 {
 	pthread_t temperature_thread,templog_thread;
-	int debug = 0;
 	int not_connect = 0;
 	int c;
 	char *channel = NULL;
@@ -300,22 +303,29 @@ int main(int argc, char* argv[])
 	data1.temp_data.temp2 = 0.0;
 	data1.good_read = 0;	
 	data1.heatcool = 1;
+	data1.debug = 0;
+	data1.read_freq = 30; // default read frequency is 30 seconds
 	control_temp("0","0");
-	while ((c = getopt( argc, argv, "vc:p:t:")) != -1 )
+	while ((c = getopt( argc, argv, "vc:p:t:r:")) != -1 )
 	{
 		switch(c)
 		{
 			case 'v':
-				debug = 1;
+				data1.debug = 1;
 				break;
 			case 'c':
 				channel = optarg;
-				printf("Setting channel to : %s\n", channel);
+				syslog(LOG_INFO,"Setting channel to : %s\n", channel);
 				break;
 			case 't':
 				setpoint= atof(optarg);
-				printf("setting Ferment temp to %f\n", setpoint);
+				syslog(LOG_INFO,"Setting Ferment temp to %f\n", setpoint);
 				break;
+			case 'r':
+				data1.read_freq = atoi(optarg);
+				syslog(LOG_INFO,"Setting read frequency to %d\n", data1.read_freq);
+				break;
+
 		}
 	}
 #ifdef STORYBOARD

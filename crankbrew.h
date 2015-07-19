@@ -12,6 +12,8 @@ typedef struct _thdata {
 	temp_update_t temp_data;
 	int good_read;
 	int heatcool;
+	int read_freq;
+	int debug;
 } thdata;
 
 
