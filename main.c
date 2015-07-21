@@ -171,6 +171,7 @@ float read_temp(int fp)
 	return rounded_down;
 }
 
+
 static void * check_temperature(void * data) 
 {
 	thdata 			*thread_data = (thdata *)data;
@@ -198,7 +199,6 @@ static void * check_temperature(void * data)
 			} else {
 				event_data.temp1 = old_wort; 
 				syslog(LOG_ERR, "one wire read failed for Wort, using old temp of %f",event_data.temp1);
-				continue;
 			}
 			temp_read = read_temp(fp1);
 			if ( temp_read != -999.0 ) {
@@ -207,7 +207,6 @@ static void * check_temperature(void * data)
 			} else {
 				event_data.temp2 = old_ambient;
 				syslog(LOG_ERR, "one wire read failed for Ambient, using old temp of %f",event_data.temp2);
-				continue;
 			}
 			if ( event_data.temp1 != old_wort || event_data.temp2 != old_ambient ) {
 				thread_data->temp_data.temp1 = event_data.temp1;
@@ -240,8 +239,8 @@ static void * check_temperature(void * data)
 					syslog(LOG_ERR,"Unable to enable the chiller\n");
 				}
 			}
-			close(fp1);
 			close(fp);
+			close(fp1);
 			sleep(thread_data->read_freq);
 		 } else {
 			syslog(LOG_ERR, "unable to open temperature sensors");
