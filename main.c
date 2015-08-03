@@ -22,47 +22,74 @@
 #include "curl/curl.h"
 #include "lcfg/lcfg.h"
 #include "crankbrew.h"
-#include <fcntl.h>
+#include <linux/fcntl.h>
 #include <dirent.h>
 #include <syslog.h>
+#include <linux/inotify.h>
 
 char * temp_wort;
 char * temp_ambient;
 char * web_address;
+char * user;
+char * pass;
 char *heat_control = "/sys/class/gpio/gpio51/value";
 char *cool_control = "/sys/class/gpio/gpio60/value";
 int cool_fd;
 int heat_fd;
-float setpoint = 16.0f;
 
 struct MemoryStruct {
 	  char *memory;
 	  size_t size;
 };
 
-static size_t
-WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *userp)
-{
-	  size_t realsize = size * nmemb;
-	  struct MemoryStruct *mem = (struct MemoryStruct *)userp;
-		 
-	  mem->memory = realloc(mem->memory, mem->size + realsize + 1);
-	  if(mem->memory == NULL) {
-		  /* out of memory! */ 
-		  syslog(LOG_ERR,"not enough memory (realloc returned NULL)\n");
-		  return 0;
-	  }
-							    
-	  memcpy(&(mem->memory[mem->size]), contents, realsize);
-	  mem->size += realsize;
-	  mem->memory[mem->size] = 0;
-
-	  return realsize;
-}
-
 int read_setpoint(void *data)
 {
 	thdata	*thread_data = (thdata *)data;
+	char buffer[EVENT_BUF_LEN];
+	int fd;
+	int wd;
+	int length;
+	int i = 0;
+	
+	syslog(LOG_DEBUG,"Starting to watch /tmp/set_point");
+	fd = inotify_init();
+	if ( fd < 0 ) {
+		syslog(LOG_ERR,"Inotify Init failed");
+		return 0;
+	}
+
+	wd = inotify_add_watch(fd,"/tmp/set_point",IN_CLOSE_WRITE | IN_CREATE);
+
+	while ( 1 ) {
+		i = 0;
+		syslog(LOG_DEBUG, "Waiting on inotify");
+		length = read(fd, buffer, EVENT_BUF_LEN);
+
+		if ( length < 0 ) {
+			syslog(LOG_ERR, "Inotify Read Failed");
+			return 0;
+		}
+		while ( i < length ) {     
+			struct inotify_event *event = ( struct inotify_event * ) &buffer[i];     
+			if ( event->mask & (IN_CLOSE_WRITE) ) {
+				FILE * t_fd = fopen("/tmp/set_point", "r");
+				char temp_buf[32];
+				long length;
+				if ( t_fd ) {
+					while ( fgets(temp_buf, 32, t_fd) != NULL )  {
+					}
+				}
+				fclose(t_fd);
+				if ( temp_buf ) {
+					thread_data->temp_data.set_point = atof(temp_buf);
+					syslog(LOG_DEBUG, "Setpoint converted to float is %f\n", thread_data->temp_data.set_point);
+				}
+			}
+			i += EVENT_SIZE + event->len;
+		}
+	}
+	inotify_rm_watch(fd,wd);
+	close(fd);
 }
 	
 int log_temp(void *data) 
@@ -78,6 +105,8 @@ int log_temp(void *data)
 	chunk.memory = malloc(1);
 	chunk.size = 0;
 
+	char userpass[32];
+	snprintf(userpass,sizeof userpass,"%s:%s",user,pass);
 	while (1) {
 
 	curl_global_init(CURL_GLOBAL_ALL);
@@ -92,6 +121,8 @@ int log_temp(void *data)
 				curl_easy_setopt(curl, CURLOPT_VERBOSE, 0L);
 			}
 			curl_easy_setopt(curl, CURLOPT_FORBID_REUSE, 1L); 
+			curl_easy_setopt(curl,CURLOPT_HTTPAUTH,(long)CURLAUTH_ANY);
+			curl_easy_setopt(curl,CURLOPT_USERPWD,userpass);
 			res = curl_easy_perform(curl);
 			if ( res != CURLE_OK) {
 				fprintf(stderr, "curl_easy_perform() failed : %s\n", curl_easy_strerror(res));
@@ -153,7 +184,7 @@ float read_temp(int fp)
 			strncpy(tmpData, strstr(onewire, "t=") + 2, 5); 
 			float_val = strtof(tmpData, NULL);
 			float_val = float_val /1000;
-			syslog(LOG_INFO,"Read Temp: %.3f C\n", float_val);
+			//syslog(LOG_INFO,"Read Temp: %.3f C\n", float_val);
 			failed_read = 0;
 		} else {
 			failed_read = 1;
@@ -215,15 +246,15 @@ static void * check_temperature(void * data)
 			//	ret = temp_update(thread_data->send_handle, NULL, &event_data);
 			}
 		
-			if ( thread_data->temp_data.temp1 < (setpoint-0.3) && thread_data->temp_data.temp1 != -1 ) {
-				syslog(LOG_NOTICE,"Heat Enabled [ Setpoint %f : Wort Temp : %f\n", setpoint,thread_data->temp_data.temp1);
+			if ( thread_data->temp_data.temp1 < (thread_data->temp_data.set_point-0.3) && thread_data->temp_data.temp1 != -1 ) {
+				syslog(LOG_NOTICE,"Heat Enabled [ Setpoint %f : Wort Temp : %f\n", thread_data->temp_data.set_point,thread_data->temp_data.temp1);
 				if ( control_temp("1","0") ) {
 					thread_data->heatcool=2;
 				} else {
 					syslog(LOG_ERR,"Error, unable to enable heating");
 				}
 			}
-			if ( thread_data->temp_data.temp1 == setpoint || thread_data->temp_data.temp1 == (setpoint+0.1) || thread_data->temp_data.temp1 == (setpoint-0.1) ) {
+			if ( thread_data->temp_data.temp1 == thread_data->temp_data.set_point || thread_data->temp_data.temp1 == (thread_data->temp_data.set_point+0.1) || thread_data->temp_data.temp1 == (thread_data->temp_data.set_point-0.1) ) {
 				syslog(LOG_NOTICE,"Heating and Cooling disabled");
 				if ( control_temp("0","0") ) {
 					thread_data->heatcool=1;
@@ -231,8 +262,8 @@ static void * check_temperature(void * data)
 					syslog(LOG_ERR,"Unable to disable heating and cooling\n");
 				}
 			}
-			if ( thread_data->temp_data.temp1 > (setpoint + 0.4)  && thread_data->temp_data.temp2 >= 3 && thread_data->temp_data.temp1 != -1) {
-				syslog(LOG_NOTICE,"Chill Enabled [ Setpoint %f : Wort Temp : %f\n", setpoint,thread_data->temp_data.temp1);
+			if ( thread_data->temp_data.temp1 > (thread_data->temp_data.set_point + 0.4)  && thread_data->temp_data.temp2 >= 3 && thread_data->temp_data.temp1 != -1) {
+				syslog(LOG_NOTICE,"Chill Enabled [ Setpoint %f : Wort Temp : %f\n", thread_data->temp_data.set_point,thread_data->temp_data.temp1);
 				if ( control_temp("0","1") ) {
 					thread_data->heatcool=3;
 				} else {
@@ -265,7 +296,7 @@ enum lcfg_status read_cfg(const char *key, void *data, size_t len, void *user_da
 
 int main(int argc, char* argv[])
 {
-	pthread_t temperature_thread,templog_thread;
+	pthread_t temperature_thread,templog_thread,setpoint_thread;
 	int not_connect = 0;
 	int c;
 	char *channel = NULL;
@@ -292,6 +323,8 @@ int main(int argc, char* argv[])
 	if ( lcfg_value_get(cfg, "web_address", (void *)&web_address, &len) != lcfg_status_ok ) {
 		syslog(LOG_ERR,"Error reading web_address : %s\n", lcfg_error_get(cfg));
 	}
+	lcfg_value_get(cfg, "user",(void *)&user,&len);
+	lcfg_value_get(cfg,"pass",(void *)&pass,&len);
 
 	// assign the GPIO file descriptors
 	
@@ -317,8 +350,8 @@ int main(int argc, char* argv[])
 				syslog(LOG_INFO,"Setting channel to : %s\n", channel);
 				break;
 			case 't':
-				setpoint= atof(optarg);
-				syslog(LOG_INFO,"Setting Ferment temp to %f\n", setpoint);
+				data1.temp_data.set_point= atof(optarg);
+				syslog(LOG_INFO,"Setting Ferment temp to %f\n", data1.temp_data.set_point);
 				break;
 			case 'r':
 				data1.read_freq = atoi(optarg);
@@ -348,10 +381,23 @@ int main(int argc, char* argv[])
 	// push the send handle into the thread data pointer so we can access it in our check_tmep thread.
 	data1.send_handle = send_handle;
 #endif
+	FILE * t_fd = fopen("/tmp/set_point", "r");
+	char temp_buf[32];
+	long length;
+	if ( t_fd ) {
+		while ( fgets(temp_buf, 32, t_fd) != NULL )  {
+		}
+	}
+	fclose(t_fd);
+	if ( temp_buf ) {
+		data1.temp_data.set_point = atof(temp_buf);
+		syslog(LOG_DEBUG, "Setpoint converted to float is %f\n", data1.temp_data.set_point);
+	}
 	syslog(LOG_INFO,"Fermtroller starting");
 	pthread_create(&temperature_thread, NULL, (void *)&check_temperature, &data1);
 	sleep(1);
 	pthread_create(&templog_thread, NULL, (void *)&log_temp, &data1);
+	pthread_create(&setpoint_thread, NULL, (void *)&read_setpoint, &data1);
 	ret = pthread_mutex_init(&mutex, NULL);
 	if(ret != 0) {
 		syslog(LOG_ERR,"Mutex error\n");
@@ -376,6 +422,8 @@ int main(int argc, char* argv[])
 	free (temp_wort);
 	free (temp_ambient);
 	free (web_address);
+	free (user);
+	free (pass);
 	syslog(LOG_INFO,"Fermtroller shutting down\n");
 
 	close(cool_fd);
